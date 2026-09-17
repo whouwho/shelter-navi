@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>スマート避難ナビ</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    #map { height: 350px; width: 100%; border-radius: 0.75rem; }
+    .glass { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(8px); }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800 pb-12">
+
+  <!-- Header -->
+  <header class="bg-red-600 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
+    <div class="flex items-center gap-2">
+      <i class="fa-solid font-bold text-2xl fa-shield-halved"></i>
+      <h1 class="font-bold text-xl tracking-wide">スマート避難ナビ</h1>
+    </div>
+    <span class="text-xs bg-red-700 px-2.5 py-1 rounded-full border border-red-500 font-mono">MVP v2.0</span>
+  </header>
+
+  <main class="max-w-2xl mx-auto p-4 space-y-4">
+
+    <!-- Hero / Status Section -->
+    <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 text-center space-y-3">
+      <p class="text-sm text-slate-500 font-medium">熊本地震の教訓を活かした避難検索ツール</p>
+      
+      <button id="locate-btn" onclick="initNavigation()" class="w-full bg-red-600 hover:bg-red-700 active:scale-98 transition text-white font-bold py-3.5 px-6 rounded-xl shadow-lg shadow-red-200 flex items-center justify-center gap-2 text-base">
+        <i class="fa-solid fa-location-crosshairs text-lg"></i>
+        <span>現在地から避難所を検索する</span>
+      </button>
+
+      <div id="status-message" class="text-xs text-slate-500 pt-1 flex items-center justify-center gap-1">
+        <i class="fa-solid fa-circle-info"></i> ボタンを押して位置情報を許可してください
+      </div>
+    </div>
+
+    <!-- Filter Buttons -->
+    <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200">
+      <label class="block text-xs font-bold text-slate-400 mb-2 uppercase tracking-wider">災害種別フィルター</label>
+      <div class="grid grid-cols-3 gap-2">
+        <button onclick="filterType('all')" id="btn-all" class="filter-btn active bg-slate-800 text-white py-2 rounded-lg text-xs font-bold transition">すべて</button>
+        <button onclick="filterType('earthquake')" id="btn-earthquake" class="filter-btn bg-slate-100 text-slate-600 py-2 rounded-lg text-xs font-bold transition hover:bg-slate-200">地震・火災</button>
+        <button onclick="filterType('flood')" id="btn-flood" class="filter-btn bg-slate-100 text-slate-600 py-2 rounded-lg text-xs font-bold transition hover:bg-slate-200">洪水・水害</button>
+      </div>
+    </div>
+
+    <!-- Map Container -->
+    <div class="bg-white p-2 rounded-2xl shadow-sm border border-slate-200">
+      <div id="map" class="z-10"></div>
+    </div>
+
+    <!-- Results List Header -->
+    <div class="flex items-center justify-between pt-2">
+      <h2 class="font-bold text-slate-700 text-lg flex items-center gap-2">
+        <i class="fa-solid fa-list-ol text-red-600"></i>
+        <span>近くの避難所</span>
+      </h2>
+      <span id="result-count" class="text-xs font-bold bg-slate-200 text-slate-600 px-2 py-1 rounded-md">0件</span>
+    </div>
+
+    <!-- Shelter Cards Container -->
+    <div id="shelter-list" class="space-y-3">
+      <div class="bg-white p-6 rounded-xl border border-dashed border-slate-300 text-center text-slate-400 text-sm">
+        「避難所を検索する」ボタンを押すと、近い順にリストが表示されます。
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // サンプルデータ（熊本市周辺の主要避難場所・施設）
+    const sampleShelters = [
+      { name: "熊本城二の丸広場（広域避難場所）", type: "earthquake", lat: 32.8055, lng: 130.7025, address: "熊本市中央区二の丸", capacity: "大規模" },
+      { name: "白川公園（一時避難場所）", type: "all", lat: 32.8032, lng: 130.7128, address: "熊本市中央区草葉町", capacity: "中規模" },
+      { name: "熊本市立壺川小学校（指定避難所）", type: "earthquake", lat: 32.8120, lng: 130.7080, address: "熊本市中央区壺川", capacity: "体育館あり" },
+      { name: "五福コミュニティセンター", type: "flood", lat: 32.7950, lng: 130.6970, address: "熊本市中央区細工町", capacity: "高台・室内" },
+      { name: "江津湖公園（広域避難場所）", type: "earthquake", lat: 32.7750, lng: 130.7350, address: "熊本市東区広木", capacity: "水害時不可" }
+    ];
+
+    let map;
+    let userMarker;
+    let shelterMarkers = [];
+    let currentFilter = 'all';
+    let userLocation = null;
+
+    // Leafletマップ初期化
+    function initMap() {
+      // 初期位置: 熊本市役所周辺
+      map = L.map('map').setView([32.8032, 130.7078], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+      }).addTo(map);
+
+      // 初期マーカーをプロット
+      renderMarkers(sampleShelters);
+    }
+
+    // マーカーのレンダリング
+    function renderMarkers(shelters) {
+      // 既存マーカー消去
+      shelterMarkers.forEach(m => map.removeLayer(m));
+      shelterMarkers = [];
+
+      shelters.forEach(s => {
+        if (currentFilter !== 'all' && s.type !== 'all' && s.type !== currentFilter) return;
+
+        const marker = L.marker([s.lat, s.lng]).addTo(map);
+        marker.bindPopup(`<b>${s.name}</b><br>${s.address}`);
+        shelterMarkers.push(marker);
+      });
+    }
+
+    // 2地点間の距離計算 (Haversine Formula)
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371; // 地球半径 km
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    }
+
+    // 位置情報取得＆メイン処理
+    function initNavigation() {
+      const statusEl = document.getElementById('status-message');
+      const btn = document.getElementById('locate-btn');
+      
+      statusEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 現在地を取得しています...';
+      btn.disabled = true;
+      btn.classList.add('opacity-75');
+
+      if (!navigator.geolocation) {
+        statusEl.innerHTML = '<span class="text-red-500">お使いの端末はGPS機能に対応していません</span>';
+        btn.disabled = false;
+        btn.classList.remove('opacity-75');
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          userLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          
+          statusEl.innerHTML = '<span class="text-emerald-600 font-bold"><i class="fa-solid fa-circle-check"></i> 現在地を取得しました</span>';
+          btn.disabled = false;
+          btn.classList.remove('opacity-75');
+
+          // マップ更新
+          map.setView([userLocation.lat, userLocation.lng], 14);
+
+          if (userMarker) map.removeLayer(userMarker);
+          userMarker = L.circleMarker([userLocation.lat, userLocation.lng], {
+            radius: 9,
+            fillColor: '#2563eb',
+            color: '#ffffff',
+            weight: 3,
+            opacity: 1,
+            fillOpacity: 0.9
+          }).addTo(map).bindPopup("現在地").openPopup();
+
+          updateListAndMap();
+        },
+        (err) => {
+          statusEl.innerHTML = '<span class="text-red-500"><i class="fa-solid fa-triangle-exclamation"></i> 位置情報の取得に失敗しました</span>';
+          btn.disabled = false;
+          btn.classList.remove('opacity-75');
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    }
+
+    // リストとマップの更新
+    function updateListAndMap() {
+      const listEl = document.getElementById('shelter-list');
+      const countEl = document.getElementById('result-count');
+      
+      let filtered = sampleShelters.filter(s => {
+        if (currentFilter === 'all') return true;
+        return s.type === 'all' || s.type === currentFilter;
+      });
+
+      if (userLocation) {
+        filtered = filtered.map(s => ({
+          ...s,
+          dist: calculateDistance(userLocation.lat, userLocation.lng, s.lat, s.lng)
+        })).sort((a, b) => a.dist - b.dist);
+      }
+
+      countEl.innerText = `${filtered.length}件`;
+      listEl.innerHTML = '';
+
+      filtered.forEach((s, idx) => {
+        const distLabel = s.dist !== undefined 
+          ? (s.dist < 1 ? `直線 約 ${Math.round(s.dist * 1000)} m` : `直線 約 ${s.dist.toFixed(1)} km`)
+          : '位置情報未取得';
+
+        const mapUrl = `https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}`;
+
+        const card = document.createElement('div');
+        card.className = "bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-2 hover:border-slate-300 transition";
+        card.innerHTML = `
+          <div class="flex justify-between items-start gap-2">
+            <div>
+              <div class="flex items-center gap-1.5 mb-1">
+                <span class="bg-red-100 text-red-700 font-bold text-[10px] px-2 py-0.5 rounded-full">第 ${idx + 1} 候補</span>
+                <span class="text-xs text-slate-400 font-medium">${s.capacity}</span>
+              </div>
+              <h3 class="font-bold text-slate-800 text-base">${s.name}</h3>
+            </div>
+            <span class="font-bold text-red-600 text-sm whitespace-nowrap bg-red-50 px-2 py-1 rounded-md">${distLabel}</span>
+          </div>
+          <p class="text-xs text-slate-500"><i class="fa-solid fa-location-dot"></i> ${s.address}</p>
+          <div class="pt-2 border-t border-slate-100 flex gap-2">
+            <a href="${mapUrl}" target="_blank" class="flex-1 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1 text-center decoration-none">
+              <i class="fa-solid fa-diamond-turn-right"></i>
+              <span>Googleマップでナビ開始</span>
+            </a>
+          </div>
+        `;
+        listEl.appendChild(card);
+      });
+
+      renderMarkers(filtered);
+    }
+
+    // 災害種別フィルター切り替え
+    function filterType(type) {
+      currentFilter = type;
+      document.querySelectorAll('.filter-btn').forEach(b => {
+        b.classList.remove('bg-slate-800', 'text-white');
+        b.classList.add('bg-slate-100', 'text-slate-600');
+      });
+      
+      const activeBtn = document.getElementById(`btn-${type}`);
+      activeBtn.classList.remove('bg-slate-100', 'text-slate-600');
+      activeBtn.classList.add('bg-slate-800', 'text-white');
+
+      updateListAndMap();
+    }
+
+    // 画面ロード時にマップ初期化
+    window.onload = initMap;
+  </script>
+</body>
+</html>
